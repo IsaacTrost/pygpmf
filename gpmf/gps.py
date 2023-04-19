@@ -1,7 +1,7 @@
 from collections import namedtuple
 from datetime import datetime, timedelta
 from xml.etree import ElementTree as ET
-
+import numpy as np
 import gpxpy
 from . import parse
 
@@ -44,7 +44,7 @@ def extract_gps_blocks(stream):
         is_gps = False
         for elt in s.value:
             content.append(elt)
-            if elt.key == "GPS5":
+            if elt.key == "GPS9":
                 is_gps = True
         if is_gps:
             yield content
@@ -66,16 +66,23 @@ def parse_gps_block(gps_block):
     block_dict = {
         s.key: s for s in gps_block
     }
-
-    gps_data = block_dict["GPS5"].value * 1.0 / block_dict["SCAL"].value
-
-    latitude, longitude, altitude, speed_2d, speed_3d = gps_data.T
-
+    
+    
+    tempy = block_dict["GPS9"].value.T[-1]
+    gpsClone = np.concatenate((block_dict["GPS9"].value, (tempy%65536)[...,None]), 1)
+    if tempy.any() < 0:
+        print("That was unexpected, the error must be real big")
+        tempy += 4294967296
+        
+    gpsClone.T[7] = tempy//65536
+    gps_data = gpsClone * 1.0 / block_dict["SCAL"].value
+    latitude, longitude, altitude, speed_2d, speed_3d, days, secs, DOP, fix = gps_data.T
+    
     return GPSData(
         description=block_dict["STNM"].value,
-        timestamp=block_dict["GPSU"].value,
-        precision=block_dict["GPSP"].value / 100.,
-        fix=block_dict["GPSF"].value,
+        timestamp=(days, secs), #Need to intagrate days and seconds to a legit timestamp
+        precision=DOP,
+        fix=fix,
         latitude=latitude,
         longitude=longitude,
         altitude=altitude,
@@ -130,24 +137,25 @@ def make_pgx_segment(gps_blocks, first_only=False, speeds_as_extensions=True):
     """
 
     track_segment = gpxpy.gpx.GPXTrackSegment()
-    dt = timedelta(seconds=1.0 / 18.)
 
     for gps_data in gps_blocks:
-        time = datetime.strptime(gps_data.timestamp, "%Y-%m-%d %H:%M:%S.%f")
         # Reference says the frequency is about 18 Hz and other GPS data about 1Hz
         stop = 1 if first_only else gps_data.npoints
         for i in range(stop):
+            print(gps_data.timestamp[0][i], gps_data.timestamp[1][i])
+            time = datetime(2000, 1, 1, 0, 0, 0, 0) + timedelta(days = gps_data.timestamp[0][i], seconds = gps_data.timestamp[1][i])
+            print(time)
             tp = gpxpy.gpx.GPXTrackPoint(
                 latitude=gps_data.latitude[i],
                 longitude=gps_data.longitude[i],
                 elevation=gps_data.altitude[i],
                 speed=gps_data.speed_3d[i],
                 position_dilution=gps_data.precision,
-                time=time + i * dt,
+                time = time,
                 symbol="Square",
             )
 
-            tp.type_of_gpx_fix = FIX_TYPE[gps_data.fix]
+            tp.type_of_gpx_fix = FIX_TYPE[gps_data.fix[i]]
 
             if speeds_as_extensions:
 
